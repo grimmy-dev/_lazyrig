@@ -1,0 +1,4 @@
+/target
+
+# Design specs and build slices stay local, in every crate.
+specs/
