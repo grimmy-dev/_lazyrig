@@ -10,6 +10,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+memchr.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 trash.workspace = true

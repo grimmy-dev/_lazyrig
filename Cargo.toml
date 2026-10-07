@@ -13,6 +13,7 @@ description = "A lazyvim-inspired multi-agent harness: lazy, customizable and mi
 publish = false
 
 [workspace.dependencies]
+memchr = "2"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"

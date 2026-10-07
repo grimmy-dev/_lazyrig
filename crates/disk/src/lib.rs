@@ -3,8 +3,10 @@
 //! Stateless free functions over sync std. No async and no logging: a caller on the runtime wraps
 //! one call in `spawn_blocking`, and logs the errors with its own rules.
 
+pub mod edit;
 mod error;
 pub mod paths;
+pub mod read;
 pub mod temp;
 pub mod trash;
 pub mod write;
