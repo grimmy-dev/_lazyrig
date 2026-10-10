@@ -13,6 +13,7 @@ description = "A lazyvim-inspired multi-agent harness: lazy, customizable and mi
 publish = false
 
 [workspace.dependencies]
+criterion = "0.8"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
