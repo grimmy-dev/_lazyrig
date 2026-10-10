@@ -5,17 +5,13 @@ use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::io;
+use crate::error::{found, io};
+use crate::temp::temp_path;
 use crate::{Error, Result};
 
 /// Permission bits of a mode, without the file-type bits.
 const MODE_BITS: u32 = 0o7777;
-
-/// Makes temp names unique inside one process; the pid makes them unique across processes.
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Replaces `path` with `bytes` through a temp file and a rename.
 /// A link is followed and survives; an existing file keeps its mode; missing parent dirs are created.
@@ -27,14 +23,14 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let target = resolve(path)?;
     let (dir, name) = split(&target)?;
-    let mode = match fs::metadata(&target) {
-        Ok(m) => Some(m.permissions().mode() & MODE_BITS),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(io(&target, e)),
-    };
+    let mode = found(&target, fs::metadata(&target))?.map(|m| m.permissions().mode() & MODE_BITS);
     fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
-    let temp = temp_for(dir, name);
-    if let Err(e) = replace(&temp, &target, dir, bytes, mode) {
+    let temp = temp_path(dir, name);
+    // Every step that can fail once the temp exists, so the cleanup below covers them all.
+    let written = write_temp(&temp, bytes, mode)
+        .and_then(|()| fs::rename(&temp, &target))
+        .and_then(|()| sync_dir(dir));
+    if let Err(e) = written {
         // The first error is the one worth reporting; a failed cleanup must not hide it.
         let _ = fs::remove_file(&temp);
         return Err(io(&target, e));
@@ -50,14 +46,13 @@ pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// # Errors
 /// [`Error::Io`] when a step fails, with the temp file removed.
 pub fn create_new(path: &Path, bytes: &[u8]) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => return Ok(false),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io(path, e)),
+    // Checked first so the common "already there" case costs one stat, not a temp write and fsync.
+    if found(path, fs::symlink_metadata(path))?.is_some() {
+        return Ok(false);
     }
     let (dir, name) = split(path)?;
     fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
-    let temp = temp_for(dir, name);
+    let temp = temp_path(dir, name);
     if let Err(e) = write_temp(&temp, bytes, None) {
         let _ = fs::remove_file(&temp);
         return Err(io(path, e));
@@ -68,7 +63,7 @@ pub fn create_new(path: &Path, bytes: &[u8]) -> Result<bool> {
     match linked {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) if is_no_hard_link(&e) => return write_direct(path, bytes),
+        Err(e) if is_no_hard_link(&e) => return write_direct(path, dir, bytes),
         Err(e) => return Err(io(path, e)),
     }
     sync_dir(dir).map_err(|e| io(dir, e))?;
@@ -77,43 +72,17 @@ pub fn create_new(path: &Path, bytes: &[u8]) -> Result<bool> {
 
 /// The real file to write: a link's target, or `path` itself when it is not a link or does not exist yet.
 fn resolve(path: &Path) -> Result<PathBuf> {
-    match fs::symlink_metadata(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(path.to_path_buf()),
-        Err(e) => return Err(io(path, e)),
-        Ok(meta) if !meta.file_type().is_symlink() => return Ok(path.to_path_buf()),
-        Ok(_) => {}
+    let is_link =
+        found(path, fs::symlink_metadata(path))?.is_some_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return Ok(path.to_path_buf());
     }
-    match path.canonicalize() {
-        Ok(target) => Ok(target),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dangling {
-            path: path.to_path_buf(),
-        }),
-        Err(e) => Err(io(path, e)),
-    }
+    found(path, path.canonicalize())?.ok_or_else(|| Error::Dangling {
+        path: path.to_path_buf(),
+    })
 }
 
-/// A temp path beside the target, `<name>.tmp.<pid>.<n>`, so the rename stays on one file system.
-fn temp_for(dir: &Path, name: &OsStr) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut temp = name.to_os_string();
-    temp.push(format!(".tmp.{}.{n}", process::id()));
-    dir.join(temp)
-}
-
-/// Writes the temp, renames it over the target and syncs the dir: every step that can fail once the temp exists.
-fn replace(
-    temp: &Path,
-    target: &Path,
-    dir: &Path,
-    bytes: &[u8],
-    mode: Option<u32>,
-) -> io::Result<()> {
-    write_temp(temp, bytes, mode)?;
-    fs::rename(temp, target)?;
-    sync_dir(dir)
-}
-
-/// Creates `temp` (never an existing file), writes `bytes`, applies `mode` and syncs to disk.
+/// Creates `temp` (never over an existing file), writes `bytes`, applies `mode` and syncs it to disk.
 fn write_temp(temp: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
     let mut file = File::create_new(temp)?;
     file.write_all(bytes)?;
@@ -150,19 +119,18 @@ fn is_no_hard_link(e: &io::Error) -> bool {
     )
 }
 
-/// Fallback for file systems with no hard links: create and write in place.
-/// Only here can a half file carry the real name; a failed write removes it, since we just made it.
-fn write_direct(path: &Path, bytes: &[u8]) -> Result<bool> {
-    let mut file = match File::create_new(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) => return Err(io(path, e)),
-    };
-    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        let _ = fs::remove_file(path);
-        return Err(io(path, e));
+/// Fallback for file systems with no hard links: create and write in place, with the same steps
+/// as a temp. Only here can a half file carry the real name; a failed write removes it, since we
+/// just made it.
+fn write_direct(path: &Path, dir: &Path, bytes: &[u8]) -> Result<bool> {
+    match write_temp(path, bytes, None).and_then(|()| sync_dir(dir)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => {
+            let _ = fs::remove_file(path);
+            Err(io(path, e))
+        }
     }
-    Ok(true)
 }
 
 #[cfg(test)]

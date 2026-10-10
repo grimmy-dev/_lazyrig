@@ -1,17 +1,33 @@
-//! Cleans up temp files a crash left beside their targets.
+//! Owns the temp-file name that `write` uses, and cleans up the temps a crash left behind.
 //! The binary sweeps `$ROOT` at boot; config sweeps its lua dirs.
 
 use std::ffi::OsStr;
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
-use std::{fs, io};
 
 use crate::Result;
-use crate::error::io;
+use crate::error::found;
 
 /// Age at which a temp counts as stale. A write takes milliseconds, so a live writer's temp is never this old.
 const TEMP_MAX_AGE: Duration = Duration::from_hours(1);
+/// The tag between the name and the pid. Built and parsed only in this file, so the two never drift.
+const TAG: &str = "tmp";
+
+/// Makes temp names unique inside one process; the pid makes them unique across processes.
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh temp path beside the target: `<name>.tmp.<pid>.<n>`. Same dir, so a rename over the
+/// target stays on one file system and stays atomic.
+pub(crate) fn temp_path(dir: &Path, name: &OsStr) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temp = name.to_os_string();
+    temp.push(format!(".{TAG}.{}.{n}", process::id()));
+    dir.join(temp)
+}
 
 /// Removes `<stem>.tmp.<pid>.<n>` files in `dir` older than one hour. Not recursive.
 /// Only names from the listing decide what goes; a failed remove skips that entry.
@@ -20,10 +36,8 @@ const TEMP_MAX_AGE: Duration = Duration::from_hours(1);
 /// # Errors
 /// [`crate::Error::Io`] when `dir` exists but cannot be listed. A missing `dir` is `Ok(0)`.
 pub fn sweep(dir: &Path) -> Result<usize> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(io(dir, e)),
+    let Some(entries) = found(dir, fs::read_dir(dir))? else {
+        return Ok(0);
     };
     let now = SystemTime::now();
     let mut removed = 0;
@@ -45,7 +59,7 @@ pub fn sweep(dir: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// True for `<stem>.tmp.<digits>.<digits>`, the name `write` gives its temps.
+/// True for `<stem>.tmp.<digits>.<digits>`, the name [`temp_path`] builds.
 /// Split from the right, so a stem with dots stays whole.
 fn is_temp_name(name: &OsStr) -> bool {
     let mut parts = name.as_bytes().rsplitn(4, |&b| b == b'.');
@@ -55,7 +69,7 @@ fn is_temp_name(name: &OsStr) -> bool {
         return false;
     };
     let is_digits = |s: &[u8]| !s.is_empty() && s.iter().all(u8::is_ascii_digit);
-    tmp == b"tmp" && is_digits(pid) && is_digits(n) && !stem.is_empty()
+    tmp == TAG.as_bytes() && is_digits(pid) && is_digits(n) && !stem.is_empty()
 }
 
 #[cfg(test)]

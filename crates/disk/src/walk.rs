@@ -44,6 +44,8 @@ pub fn tree(
         let Ok(e) = item else {
             continue;
         };
+        // Skip the root here, not with `min_depth(1)`: that also skips reading the root's
+        // `.gitignore`, and ignored entries come back.
         if e.depth() == 0 {
             continue;
         }

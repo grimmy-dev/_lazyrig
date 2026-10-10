@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::error::cap;
+use crate::error::invalid;
 use crate::{Error, Result};
 
 /// Max bytes in a name.
@@ -23,10 +23,7 @@ impl TryFrom<&str> for Name {
             && s.bytes()
                 .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'));
         if !is_safe {
-            return Err(Error::Invalid {
-                kind: "name",
-                got: cap(s),
-            });
+            return Err(invalid("name", s));
         }
         Ok(Self(s.into()))
     }

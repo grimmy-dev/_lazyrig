@@ -3,7 +3,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use grep_regex::RegexMatcherBuilder;
@@ -11,9 +11,9 @@ use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContex
 use ignore::WalkState;
 use ignore::overrides::OverrideBuilder;
 
-use crate::error::cap;
+use crate::Result;
+use crate::error::invalid;
 use crate::walk::walker;
-use crate::{Error, Result};
 
 /// Size and DFA limit for a compiled pattern, so a hostile pattern fails at build time instead
 /// of eating memory.
@@ -28,9 +28,9 @@ pub struct Grep<'a> {
     /// Same as [`crate::walk::tree`]: false skips dot and gitignored entries.
     pub hidden: bool,
     /// Lines kept before and after each match.
-    pub context: u32,
+    pub context: usize,
     /// Match lines kept. Counting goes on past it.
-    pub max: u32,
+    pub max: usize,
     /// The caller's cancel check, asked once per file.
     pub stop: &'a (dyn Fn() -> bool + Sync),
 }
@@ -61,9 +61,9 @@ pub struct Found {
     /// Files with kept lines, sorted by path.
     pub files: Vec<FileHits>,
     /// Every match, kept or not.
-    pub matches: u64,
+    pub matches: usize,
     /// Every file with a match, kept or not.
-    pub files_matched: u64,
+    pub files_matched: usize,
     /// True when `matches` went past `max`, so some lines were left out.
     pub capped: bool,
 }
@@ -74,34 +74,27 @@ pub struct Found {
 /// Blocking: a caller on the runtime runs it inside one `spawn_blocking`.
 ///
 /// # Errors
-/// [`Error::Invalid`] for a bad pattern or glob; [`Error::Io`] when `root` cannot be read.
+/// [`crate::Error::Invalid`] for a bad pattern or glob; [`crate::Error::Io`] when `root` cannot be read.
 pub fn grep(root: &Path, g: &Grep) -> Result<Found> {
     let regex = RegexMatcherBuilder::new()
         .case_smart(true)
         .size_limit(REGEX_LIMIT)
         .dfa_size_limit(REGEX_LIMIT)
         .build(g.pattern)
-        .map_err(|_| Error::Invalid {
-            kind: "pattern",
-            got: cap(g.pattern),
-        })?;
+        .map_err(|_| invalid("pattern", g.pattern))?;
     let mut builder = walker(root, g.hidden)?;
     if let Some(glob) = g.glob {
         let overrides = OverrideBuilder::new(root)
             .add(glob)
             .and_then(|o| o.build())
-            .map_err(|_| Error::Invalid {
-                kind: "glob",
-                got: cap(glob),
-            })?;
+            .map_err(|_| invalid("glob", glob))?;
         builder.overrides(overrides);
     }
 
     let hits = Mutex::new(Vec::new());
-    let matches = AtomicU64::new(0);
-    let files_matched = AtomicU64::new(0);
-    let max = u64::from(g.max);
-    let context = g.context as usize;
+    let matches = AtomicUsize::new(0);
+    let files_matched = AtomicUsize::new(0);
+    let max = g.max;
 
     // The outer closure runs once per thread: each worker owns its regex and searcher, and
     // takes the lock only to push a finished file.
@@ -110,8 +103,8 @@ pub fn grep(root: &Path, g: &Grep) -> Result<Found> {
         let mut searcher = SearcherBuilder::new()
             .binary_detection(BinaryDetection::quit(0))
             .line_number(true)
-            .before_context(context)
-            .after_context(context)
+            .before_context(g.context)
+            .after_context(g.context)
             .build();
         // Borrow here so `move` takes the references, not the shared state.
         let (hits, matches, files_matched) = (&hits, &matches, &files_matched);
@@ -168,8 +161,8 @@ pub fn grep(root: &Path, g: &Grep) -> Result<Found> {
 
 /// Collects one file's lines while the shared match count is under `max`.
 struct Collect<'a> {
-    matches: &'a AtomicU64,
-    max: u64,
+    matches: &'a AtomicUsize,
+    max: usize,
     lines: Vec<Line>,
     had_match: bool,
 }
@@ -211,10 +204,11 @@ fn line_text(bytes: &[u8]) -> Box<[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use std::fs;
     use tempfile::TempDir;
 
-    fn run(root: &Path, pattern: &str, glob: Option<&str>, max: u32) -> Result<Found> {
+    fn run(root: &Path, pattern: &str, glob: Option<&str>, max: usize) -> Result<Found> {
         grep(
             root,
             &Grep {

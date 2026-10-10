@@ -12,14 +12,14 @@ pub enum ReplaceStatus {
         /// The whole new content.
         bytes: Vec<u8>,
         /// How many matches were replaced.
-        count: u32,
+        count: usize,
     },
     /// `old` is not in the content, or `old` is empty.
     NoMatch,
     /// `old` matches more than once and `all` is false; nothing changed.
     Ambiguous {
         /// How many times `old` matches.
-        count: u32,
+        count: usize,
     },
 }
 
@@ -37,11 +37,11 @@ pub fn replace(hay: &[u8], old: &[u8], new: &[u8], all: bool) -> ReplaceStatus {
     match starts.len() {
         0 => ReplaceStatus::NoMatch,
         n if n > 1 && !all => ReplaceStatus::Ambiguous {
-            count: to_u32(finder.find_iter(hay).count()),
+            count: finder.find_iter(hay).count(),
         },
         _ => ReplaceStatus::Done {
             bytes: splice(hay, &starts, old.len(), new),
-            count: to_u32(starts.len()),
+            count: starts.len(),
         },
     }
 }
@@ -59,11 +59,6 @@ fn splice(hay: &[u8], starts: &[usize], old_len: usize, new: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(&hay[last..]);
     out
-}
-
-/// A count as `u32`, capped instead of wrapped.
-fn to_u32(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
