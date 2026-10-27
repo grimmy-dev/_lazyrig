@@ -6,8 +6,9 @@ I want to get better at Rust and understand agent orchestration end to end, from
 
 ## Status
 
-Early. The first crate, `disk`, is done: home and project paths, crash-safe writes, the OS trash and the
-temp-file sweep. The other crates come next, one at a time.
+Early. The first crate, [`disk`](crates/disk/README.md), is done: home and project paths, crash-safe
+writes, the OS trash, the temp-file sweep, and the read, edit, walk and search behind the file tools. The
+other crates come next, one at a time.
 
 ## Layout
 
