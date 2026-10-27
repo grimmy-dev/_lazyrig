@@ -1,4 +1,8 @@
 /target
+/reviews
 
 # Design specs and build slices stay local, in every crate.
 specs/
+
+# Benches and their baselines stay local until the binary has one bench suite.
+benches/
