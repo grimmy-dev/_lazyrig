@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use grep_searcher::{
+    BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
+};
 use ignore::WalkState;
 use ignore::overrides::OverrideBuilder;
 
@@ -122,7 +124,9 @@ pub fn grep(root: &Path, g: &Grep) -> Result<Found> {
                 matches,
                 max,
                 lines: Vec::new(),
+                pending: Vec::new(),
                 had_match: false,
+                kept_last: false,
             };
             // A file that vanished or cannot be read is skipped, like in `tree`.
             if searcher
@@ -164,7 +168,9 @@ struct Collect<'a> {
     matches: &'a AtomicUsize,
     max: usize,
     lines: Vec<Line>,
+    pending: Vec<Line>,
     had_match: bool,
+    kept_last: bool,
 }
 
 impl Sink for Collect<'_> {
@@ -174,23 +180,33 @@ impl Sink for Collect<'_> {
         self.had_match = true;
         // `fetch_add` returns the count before this match.
         let seen = self.matches.fetch_add(1, Ordering::Relaxed) + 1;
-        if seen <= self.max {
+        // Decide once here; context reads `kept_last`, never the shared count, which other
+        // workers keep moving.
+        self.kept_last = seen <= self.max;
+        if self.kept_last {
+            self.lines.append(&mut self.pending);
             self.lines.push(Line {
                 n: m.line_number().unwrap_or(0),
                 text: line_text(m.bytes()),
                 is_context: false,
             });
+        } else {
+            self.pending.clear();
         }
         Ok(true)
     }
 
     fn context(&mut self, _: &Searcher, c: &SinkContext<'_>) -> io::Result<bool> {
-        if self.matches.load(Ordering::Relaxed) < self.max {
-            self.lines.push(Line {
-                n: c.line_number().unwrap_or(0),
-                text: line_text(c.bytes()),
-                is_context: true,
-            });
+        let line = Line {
+            n: c.line_number().unwrap_or(0),
+            text: line_text(c.bytes()),
+            is_context: true,
+        };
+        // Before-context waits in `pending` until its match is kept or dropped.
+        match c.kind() {
+            SinkContextKind::Before => self.pending.push(line),
+            SinkContextKind::After if self.kept_last => self.lines.push(line),
+            SinkContextKind::After | SinkContextKind::Other => {}
         }
         Ok(true)
     }
@@ -208,14 +224,20 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn run(root: &Path, pattern: &str, glob: Option<&str>, max: usize) -> Result<Found> {
+    fn run(
+        root: &Path,
+        pattern: &str,
+        glob: Option<&str>,
+        context: usize,
+        max: usize,
+    ) -> Result<Found> {
         grep(
             root,
             &Grep {
                 pattern,
                 glob,
                 hidden: false,
-                context: 0,
+                context,
                 max,
                 stop: &|| false,
             },
@@ -229,7 +251,7 @@ mod tests {
         fs::write(tmp.path().join("a.rs"), "x\nfn main() {}\nFoo\nfoo\n").unwrap();
         fs::write(tmp.path().join("bin.dat"), b"fn main\0").unwrap();
 
-        let f = run(tmp.path(), "fn main", None, 100).unwrap();
+        let f = run(tmp.path(), "fn main", None, 0, 100).unwrap();
         assert_eq!(f.matches, 2);
         let paths: Vec<_> = f
             .files
@@ -239,32 +261,45 @@ mod tests {
         assert_eq!(paths, ["a.rs", "b.rs"]);
         assert_eq!(f.files[0].lines[0].n, 2);
 
-        assert_eq!(run(tmp.path(), "Foo", None, 100).unwrap().matches, 1);
-        assert_eq!(run(tmp.path(), "foo", None, 100).unwrap().matches, 2);
+        assert_eq!(run(tmp.path(), "Foo", None, 0, 100).unwrap().matches, 1);
+        assert_eq!(run(tmp.path(), "foo", None, 0, 100).unwrap().matches, 2);
     }
 
     #[test]
     fn grep_caps_lines_but_counts_all() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("f.txt"), "hit\n".repeat(5)).unwrap();
-        let f = run(tmp.path(), "hit", None, 2).unwrap();
+        let f = run(tmp.path(), "hit", None, 0, 2).unwrap();
         assert_eq!(f.files[0].lines.len(), 2);
         assert_eq!(f.matches, 5);
         assert!(f.capped);
     }
 
     #[test]
+    fn grep_keeps_context_only_for_kept_matches() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("f.txt"), "hit\nx\ny\nhit\n").unwrap();
+        let f = run(tmp.path(), "hit", None, 1, 1).unwrap();
+        let kept: Vec<_> = f.files[0]
+            .lines
+            .iter()
+            .map(|l| (l.n, l.is_context))
+            .collect();
+        assert_eq!(kept, [(1, false), (2, true)]);
+    }
+
+    #[test]
     fn grep_rejects_bad_pattern_and_glob() {
         let tmp = TempDir::new().unwrap();
         assert!(matches!(
-            run(tmp.path(), "(", None, 10),
+            run(tmp.path(), "(", None, 0, 10),
             Err(Error::Invalid {
                 kind: "pattern",
                 ..
             })
         ));
         assert!(matches!(
-            run(tmp.path(), "x", Some("["), 10),
+            run(tmp.path(), "x", Some("["), 0, 10),
             Err(Error::Invalid { kind: "glob", .. })
         ));
     }
