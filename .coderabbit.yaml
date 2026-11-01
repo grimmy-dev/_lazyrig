@@ -1,0 +1,87 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+early_access: false
+tone_instructions: >-
+  Terse and technical. One finding per comment: the problem, why it breaks, the fix.
+  No praise, no summary of what the code does, no style nits that rustfmt or clippy already catch.
+
+reviews:
+  profile: assertive
+  high_level_summary: false
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  changed_files_summary: false
+
+  # Review code and build config only.
+  path_filters:
+    - "!**/README.md"
+    - "!LICENSE"
+    - "!Cargo.lock"
+    - "!**/specs/**"
+    - "!reviews/**"
+    - "!target/**"
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        A personal Rust project: simple, correct and efficient beats general. Flag over-engineering:
+        a trait, generic, type or option with no current caller.
+        Check, in this order:
+        1. Correctness: logic bugs, off-by-one, wrong edge cases (empty, one, many, too big).
+        2. Concurrency: a lock held across `.await`, a token fire or a channel send; a wrong atomic
+           `Ordering`; a race between two exit paths; a task or timer left behind on any exit.
+        3. Panics: `unwrap`, `expect`, indexing, `Instant + Duration` overflow or integer overflow
+           outside tests. An `expect` is allowed only for a documented invariant.
+        4. Security: a secret, key or token in code or tests; personal data, tool args, tool labels
+           or prompt text in a log; untrusted input (model output, lua config, file contents) used
+           before it is validated into a trusted type.
+        5. Resources: an allocation, clone or lock on a hot path that can go; a blocking call on an
+           async task.
+        6. Names: a name that lies about what the thing is or does; one concept with two names.
+        7. Docs: every public item has a doc that says what it does and why, not how.
+        Errors are typed (`thiserror` in adapters), never swallowed, and name what failed without
+        echoing untrusted input.
+
+    - path: "crates/core/**"
+      instructions: |
+        Layer 1, the domain. No I/O, no async, no traits, no workspace dependency. Only types and the
+        behaviour a value type owes: parse, print, compare. `FromStr` is the only constructor from an
+        untrusted string. Flag any type added with no caller in another crate.
+
+    - path: "crates/ports/**"
+      instructions: |
+        Layer 2. Traits over core types only. Flag any adapter type in a signature, any trait that is
+        not object safe, and any method no application code needs.
+
+    - path: "crates/ticker/**"
+      instructions: |
+        Adapter for the clock. It fires a task's own token and never kills. The timing rule `check`
+        stays pure: no clock read, no lock. Budgets are clamped once in `Timer::new`. A `TickWatch`
+        drop must clean up without firing, and every cleanup must be safe to repeat.
+
+    - path: "crates/disk/**"
+      instructions: |
+        Stateless file functions over sync std. No async, no logging. A crash must leave the old file
+        or the new one, never half. A delete goes to the OS trash, never `remove_*`.
+
+    - path: "**/Cargo.toml"
+      instructions: |
+        Shared dependencies are declared once under `[workspace.dependencies]`, kept in alphabetical
+        order. Flag a feature flag no code uses and a dependency the crate does not need.
+
+  # CLI only: no review on pull requests.
+  auto_review:
+    enabled: false
+
+  tools:
+    clippy:
+      enabled: true
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+
+chat:
+  auto_reply: false
