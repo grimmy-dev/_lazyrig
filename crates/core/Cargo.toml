@@ -1,0 +1,15 @@
+[package]
+name = "lazyrig-core"
+description = "The vocabulary every other crate shares."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

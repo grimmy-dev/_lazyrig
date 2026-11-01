@@ -1,0 +1,21 @@
+[package]
+name = "lazyrig-ticker"
+description = "Time for lazyrig: elapsed ticks, plus hard and stale timers that fire a cancel token."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+autobenches = false
+
+[dependencies]
+lazyrig-core.workspace = true
+lazyrig-ports.workspace = true
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true
