@@ -6,9 +6,15 @@ I want to get better at Rust and understand agent orchestration end to end, from
 
 ## Status
 
-Early. The first crate, [`disk`](crates/disk/README.md), is done: home and project paths, crash-safe
-writes, the OS trash, the temp-file sweep, and the read, edit, walk and search behind the file tools. The
-other crates come next, one at a time.
+Early. Two crates are done:
+
+- [`disk`](crates/disk/README.md): home and project paths, crash-safe writes, the OS trash, the
+  temp-file sweep, and the read, edit, walk and search behind the file tools.
+- [`ticker`](crates/ticker/README.md): elapsed time for every running thing, and the hard and stale
+  timers that fire a task's cancel token.
+
+[`core`](crates/core/README.md) and [`ports`](crates/ports/README.md) hold only what those two need so
+far. Next is a thin path through the whole stack: one prompt in, one model reply out, stored.
 
 ## Layout
 
